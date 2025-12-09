@@ -1,22 +1,12 @@
 import Fastify from 'fastify';
 import cors from '@fastify/cors';
-import rateLimit from '@fastify/rate-limit';
 import mysql from 'mysql2/promise';
 import crypto from 'crypto';
 
 const fastify = Fastify({ logger: true });
 
-// CORS
 await fastify.register(cors, { origin: true });
 
-// Rate limiting - 5 попыток за 5 минут
-await fastify.register(rateLimit, {
-  max: 5,
-  timeWindow: '5 minutes',
-  keyGenerator: (req) => req.ip
-});
-
-// MySQL pool
 const pool = mysql.createPool({
   host: '149.202.88.119',
   database: 'gs320506',
@@ -27,17 +17,12 @@ const pool = mysql.createPool({
   connectionLimit: 10
 });
 
-// POST /api/login
 fastify.post('/api/login', async (request, reply) => {
   try {
     const { nickname, password } = request.body || {};
 
     if (!nickname || !password) {
       return reply.send({ success: false, error: 'Nickname and password required' });
-    }
-
-    if (nickname.length > 50 || password.length > 255) {
-      return reply.send({ success: false, error: 'Invalid input length' });
     }
 
     const [rows] = await pool.execute(
@@ -49,13 +34,10 @@ fastify.post('/api/login', async (request, reply) => {
       return reply.send({ success: false, error: 'Invalid credentials' });
     }
 
-    const player = rows[0];
-
-    if (player.Password === password) {
-      const token = crypto.randomUUID();
+    if (rows[0].Password === password) {
       return reply.send({
         success: true,
-        user: { nickname: player.NickName, token }
+        user: { nickname: rows[0].NickName, token: crypto.randomUUID() }
       });
     }
 
@@ -66,7 +48,6 @@ fastify.post('/api/login', async (request, reply) => {
   }
 });
 
-// GET /api/logs
 fastify.get('/api/logs', async (request, reply) => {
   try {
     const [rows] = await pool.execute(
@@ -79,18 +60,7 @@ fastify.get('/api/logs', async (request, reply) => {
   }
 });
 
-// Health check
 fastify.get('/api/health', async () => ({ status: 'ok' }));
 
-// Start
-const start = async () => {
-  try {
-    await fastify.listen({ port: 3001, host: '0.0.0.0' });
-    console.log('🚀 Fastify server running on http://localhost:3001');
-  } catch (err) {
-    fastify.log.error(err);
-    process.exit(1);
-  }
-};
-
-start();
+await fastify.listen({ port: process.env.PORT || 3001, host: '0.0.0.0' });
+console.log('🚀 Server running');
