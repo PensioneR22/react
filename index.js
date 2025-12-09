@@ -61,16 +61,20 @@ fastify.get('/api/logs', async (request, reply) => {
 
 // GET /api/stats
 // GET /api/stats - получение статистики
+// GET /api/stats - получение статистики
 fastify.get('/api/stats', async (request, reply) => {
   try {
     const [playersRows] = await pool.execute('SELECT COUNT(*) as count FROM players');
-    const [configRows] = await pool.execute('SELECT CashStatus FROM Config');
+    const [configRows] = await pool.execute('SELECT CashStatus FROM Config LIMIT 1');
 
+    const cashStatus = configRows[0]?.CashStatus || 0;
     let cashIn = 0;
     let cashOut = 0;
-    if (configRows.length >= 2) {
-      cashIn = configRows[0]?.CashStatus || 0;
-      cashOut = configRows[1]?.CashStatus || 0;
+    
+    if (cashStatus > 0) {
+      cashIn = cashStatus;
+    } else {
+      cashOut = Math.abs(cashStatus);
     }
 
     return reply.send({
