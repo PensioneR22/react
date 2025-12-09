@@ -1,15 +1,10 @@
 {
-  "name": "react-site-api",
-  "version": "1.0.0",
+  "name": "api",
   "type": "module",
-  "scripts": {
-    "start": "node index.js",
-    "dev": "node --watch index.js"
-  },
+  "scripts": { "start": "node index.js" },
   "dependencies": {
     "fastify": "^4.24.3",
     "@fastify/cors": "^8.4.1",
-    "@fastify/rate-limit": "^9.0.1",
     "mysql2": "^3.6.5"
   }
 }
