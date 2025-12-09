@@ -242,6 +242,72 @@ fastify.get('/api/stats', { preHandler: authMiddleware }, async (request, reply)
   }
 });
 
+// GET /api/player/:nickname - получить информацию об игроке - ЗАЩИЩЁННЫЙ
+fastify.get('/api/player/:nickname', { preHandler: authMiddleware }, async (request, reply) => {
+  try {
+    const { nickname } = request.params;
+
+    if (!nickname || typeof nickname !== 'string' || nickname.length > 50) {
+      return reply.send({ success: false, error: 'Некорректный никнейм' });
+    }
+
+    const [rows] = await pool.execute(
+      'SELECT NickName, ID_Telegram FROM players WHERE NickName = ? LIMIT 1',
+      [nickname.trim()]
+    );
+
+    if (rows.length === 0) {
+      return reply.send({ success: false, error: 'Игрок не найден' });
+    }
+
+    const player = rows[0];
+    return reply.send({
+      success: true,
+      player: {
+        nickname: player.NickName,
+        telegram: player.ID_Telegram || 'Не привязан'
+      }
+    });
+  } catch (error) {
+    fastify.log.error(error);
+    return reply.status(500).send({ success: false, error: 'Database error' });
+  }
+});
+
+// POST /api/unlink-telegram - отвязать телеграм игрока - ЗАЩИЩЁННЫЙ
+fastify.post('/api/unlink-telegram', { preHandler: authMiddleware }, async (request, reply) => {
+  try {
+    const { nickname } = request.body || {};
+
+    if (!nickname || typeof nickname !== 'string' || nickname.length > 50) {
+      return reply.send({ success: false, error: 'Некорректный никнейм' });
+    }
+
+    // Проверяем существование игрока
+    const [rows] = await pool.execute(
+      'SELECT NickName FROM players WHERE NickName = ? LIMIT 1',
+      [nickname.trim()]
+    );
+
+    if (rows.length === 0) {
+      return reply.send({ success: false, error: 'Игрок не найден' });
+    }
+
+    // Устанавливаем ID_Telegram = -1
+    await pool.execute(
+      'UPDATE players SET ID_Telegram = -1 WHERE NickName = ?',
+      [nickname.trim()]
+    );
+
+    fastify.log.info(`Telegram отвязан для игрока: ${nickname} (by ${request.user.nickname})`);
+
+    return reply.send({ success: true });
+  } catch (error) {
+    fastify.log.error(error);
+    return reply.status(500).send({ success: false, error: 'Database error' });
+  }
+});
+
 // Health check (публичный)
 fastify.get('/api/health', async () => ({ status: 'ok' }));
 
