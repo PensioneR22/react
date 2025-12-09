@@ -207,13 +207,38 @@ fastify.get('/api/verify', async (request, reply) => {
   });
 });
 
-// GET /api/logs - ЗАЩИЩЁННЫЙ
+// GET /api/logs - ЗАЩИЩЁННЫЙ (с пагинацией)
 fastify.get('/api/logs', { preHandler: authMiddleware }, async (request, reply) => {
   try {
-    const [rows] = await pool.execute(
-      "SELECT id, type, `desc`, DATE_FORMAT(`date`, '%Y-%m-%d') as date, TIME_FORMAT(time, '%H:%i:%s') as time FROM action_logs ORDER BY id DESC LIMIT 100"
-    );
-    return reply.send({ success: true, data: rows });
+    const page = Math.max(1, parseInt(request.query.page) || 1);
+    const limit = Math.min(150, Math.max(1, parseInt(request.query.limit) || 150));
+    const offset = (page - 1) * limit;
+    const type = request.query.type || '';
+
+    // Получаем общее количество
+    let countQuery = "SELECT COUNT(*) as total FROM action_logs";
+    let dataQuery = "SELECT id, type, `desc`, DATE_FORMAT(`date`, '%Y-%m-%d') as date, TIME_FORMAT(time, '%H:%i:%s') as time FROM action_logs";
+
+    const params = [];
+    if (type) {
+      countQuery += " WHERE type = ?";
+      dataQuery += " WHERE type = ?";
+      params.push(type);
+    }
+
+    dataQuery += " ORDER BY id DESC LIMIT ? OFFSET ?";
+
+    const [countRows] = await pool.execute(countQuery, type ? [type] : []);
+    const [rows] = await pool.execute(dataQuery, [...params, limit.toString(), offset.toString()]);
+
+    return reply.send({
+      success: true,
+      data: rows,
+      total: countRows[0].total,
+      page,
+      limit,
+      totalPages: Math.ceil(countRows[0].total / limit)
+    });
   } catch (error) {
     fastify.log.error(error);
     return reply.status(500).send({ success: false, error: 'Database error' });
