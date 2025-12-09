@@ -214,21 +214,38 @@ fastify.get('/api/logs', { preHandler: authMiddleware }, async (request, reply) 
     const limit = Math.min(150, Math.max(1, parseInt(request.query.limit) || 150));
     const offset = (page - 1) * limit;
     const type = request.query.type || '';
+    const desc = request.query.desc || '';
+    const date = request.query.date || '';
 
     // Получаем общее количество
     let countQuery = "SELECT COUNT(*) as total FROM action_logs";
     let dataQuery = "SELECT id, type, `desc`, DATE_FORMAT(`date`, '%Y-%m-%d') as date, TIME_FORMAT(time, '%H:%i:%s') as time FROM action_logs";
 
+    const conditions = [];
     const params = [];
+
     if (type) {
-      countQuery += " WHERE type = ?";
-      dataQuery += " WHERE type = ?";
+      conditions.push("type = ?");
       params.push(type);
+    }
+    if (desc) {
+      conditions.push("`desc` LIKE ?");
+      params.push(`%${desc}%`);
+    }
+    if (date) {
+      conditions.push("DATE(`date`) = ?");
+      params.push(date);
+    }
+
+    if (conditions.length > 0) {
+      const whereClause = " WHERE " + conditions.join(" AND ");
+      countQuery += whereClause;
+      dataQuery += whereClause;
     }
 
     dataQuery += " ORDER BY id DESC LIMIT ? OFFSET ?";
 
-    const [countRows] = await pool.execute(countQuery, type ? [type] : []);
+    const [countRows] = await pool.execute(countQuery, params);
     const [rows] = await pool.execute(dataQuery, [...params, limit.toString(), offset.toString()]);
 
     return reply.send({
