@@ -8,6 +8,12 @@ const fastify = Fastify({ logger: true });
 // CORS
 await fastify.register(cors, { origin: true });
 
+// Хранилище активных токенов (в production использовать Redis)
+const activeSessions = new Map();
+
+// Время жизни сессии - 10 минут
+const SESSION_DURATION = 10 * 60 * 1000;
+
 // MySQL pool
 const pool = mysql.createPool({
   host: '149.202.88.119',
@@ -19,35 +25,190 @@ const pool = mysql.createPool({
   connectionLimit: 10
 });
 
-// POST /api/login
+// Middleware для проверки авторизации
+const authMiddleware = async (request, reply) => {
+  const authHeader = request.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return reply.status(401).send({ success: false, error: 'Unauthorized' });
+  }
+
+  const token = authHeader.substring(7);
+  const session = activeSessions.get(token);
+
+  if (!session) {
+    return reply.status(401).send({ success: false, error: 'Invalid token' });
+  }
+
+  if (Date.now() > session.expiresAt) {
+    activeSessions.delete(token);
+    return reply.status(401).send({ success: false, error: 'Session expired' });
+  }
+
+  // Продлеваем сессию при активности
+  session.expiresAt = Date.now() + SESSION_DURATION;
+  request.user = session.user;
+};
+
+// Очистка устаревших сессий каждые 5 минут
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, session] of activeSessions.entries()) {
+    if (now > session.expiresAt) {
+      activeSessions.delete(token);
+    }
+  }
+}, 5 * 60 * 1000);
+
+// POST /api/login - Шаг 1: проверка логина/пароля
 fastify.post('/api/login', async (request, reply) => {
   try {
     const { nickname, password } = request.body || {};
+
     if (!nickname || !password) {
       return reply.send({ success: false, error: 'Nickname and password required' });
     }
+
+    // Защита от инъекций через длину
+    if (typeof nickname !== 'string' || typeof password !== 'string') {
+      return reply.send({ success: false, error: 'Invalid input type' });
+    }
+
+    if (nickname.length > 50 || password.length > 255) {
+      return reply.send({ success: false, error: 'Invalid input length' });
+    }
+
     const [rows] = await pool.execute(
-      'SELECT NickName, Password FROM players WHERE NickName = ? LIMIT 1',
+      'SELECT NickName, Password, Admin FROM players WHERE NickName = ? LIMIT 1',
       [nickname.trim()]
     );
+
     if (rows.length === 0) {
       return reply.send({ success: false, error: 'Invalid credentials' });
     }
-    if (rows[0].Password === password) {
-      return reply.send({
-        success: true,
-        user: { nickname: rows[0].NickName, token: crypto.randomUUID() }
-      });
+
+    const player = rows[0];
+
+    if (player.Password !== password) {
+      return reply.send({ success: false, error: 'Invalid credentials' });
     }
-    return reply.send({ success: false, error: 'Invalid credentials' });
+
+    // Проверка уровня админа
+    if (player.Admin <= 7) {
+      return reply.send({ success: false, error: 'Недостаточно прав для входа' });
+    }
+
+    // Генерируем временный токен для 2FA
+    const tempToken = crypto.randomUUID();
+    const confirmCode = Math.floor(100000 + Math.random() * 900000).toString(); // 6-значный код
+
+    // Сохраняем pending сессию (5 минут на ввод кода)
+    activeSessions.set(tempToken, {
+      user: { nickname: player.NickName, admin: player.Admin },
+      confirmCode,
+      isPending: true,
+      expiresAt: Date.now() + 5 * 60 * 1000
+    });
+
+    // В реальном приложении здесь отправка кода в Telegram
+    // Для тестирования выводим в логи (убрать в production!)
+    fastify.log.info(`2FA Code for ${player.NickName}: ${confirmCode}`);
+
+    return reply.send({
+      success: true,
+      requireConfirmation: true,
+      tempToken,
+      // Для тестирования - убрать в production!
+      _testCode: confirmCode
+    });
   } catch (error) {
     fastify.log.error(error);
     return reply.status(500).send({ success: false, error: 'Database error' });
   }
 });
 
-// GET /api/logs
-fastify.get('/api/logs', async (request, reply) => {
+// POST /api/confirm - Шаг 2: проверка кода подтверждения
+fastify.post('/api/confirm', async (request, reply) => {
+  try {
+    const { tempToken, code } = request.body || {};
+
+    if (!tempToken || !code) {
+      return reply.send({ success: false, error: 'Token and code required' });
+    }
+
+    const session = activeSessions.get(tempToken);
+
+    if (!session || !session.isPending) {
+      return reply.send({ success: false, error: 'Invalid or expired token' });
+    }
+
+    if (Date.now() > session.expiresAt) {
+      activeSessions.delete(tempToken);
+      return reply.send({ success: false, error: 'Code expired' });
+    }
+
+    if (session.confirmCode !== code.toString()) {
+      return reply.send({ success: false, error: 'Invalid code' });
+    }
+
+    // Код верный - создаём полноценную сессию
+    const authToken = crypto.randomUUID();
+    activeSessions.delete(tempToken);
+    activeSessions.set(authToken, {
+      user: session.user,
+      isPending: false,
+      expiresAt: Date.now() + SESSION_DURATION
+    });
+
+    return reply.send({
+      success: true,
+      token: authToken,
+      user: {
+        nickname: session.user.nickname,
+        admin: session.user.admin
+      }
+    });
+  } catch (error) {
+    fastify.log.error(error);
+    return reply.status(500).send({ success: false, error: 'Server error' });
+  }
+});
+
+// POST /api/logout - выход
+fastify.post('/api/logout', async (request, reply) => {
+  const authHeader = request.headers.authorization;
+  if (authHeader && authHeader.startsWith('Bearer ')) {
+    const token = authHeader.substring(7);
+    activeSessions.delete(token);
+  }
+  return reply.send({ success: true });
+});
+
+// GET /api/verify - проверка токена
+fastify.get('/api/verify', async (request, reply) => {
+  const authHeader = request.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    return reply.send({ success: false, valid: false });
+  }
+
+  const token = authHeader.substring(7);
+  const session = activeSessions.get(token);
+
+  if (!session || session.isPending || Date.now() > session.expiresAt) {
+    return reply.send({ success: false, valid: false });
+  }
+
+  // Продлеваем сессию
+  session.expiresAt = Date.now() + SESSION_DURATION;
+
+  return reply.send({
+    success: true,
+    valid: true,
+    user: session.user
+  });
+});
+
+// GET /api/logs - ЗАЩИЩЁННЫЙ
+fastify.get('/api/logs', { preHandler: authMiddleware }, async (request, reply) => {
   try {
     const [rows] = await pool.execute(
       "SELECT id, type, `desc`, DATE_FORMAT(`date`, '%Y-%m-%d') as date, TIME_FORMAT(time, '%H:%i:%s') as time FROM action_logs ORDER BY id DESC LIMIT 100"
@@ -59,23 +220,15 @@ fastify.get('/api/logs', async (request, reply) => {
   }
 });
 
-// GET /api/stats
-// GET /api/stats - получение статистики
-// GET /api/stats - получение статистики
-fastify.get('/api/stats', async (request, reply) => {
+// GET /api/stats - ЗАЩИЩЁННЫЙ
+fastify.get('/api/stats', { preHandler: authMiddleware }, async (request, reply) => {
   try {
     const [playersRows] = await pool.execute('SELECT COUNT(*) as count FROM players');
     const [configRows] = await pool.execute('SELECT CashStatus FROM Config LIMIT 1');
 
     const cashStatus = configRows[0]?.CashStatus || 0;
-    let cashIn = 0;
-    let cashOut = 0;
-    
-    if (cashStatus > 0) {
-      cashIn = cashStatus;
-    } else {
-      cashOut = Math.abs(cashStatus);
-    }
+    let cashIn = cashStatus > 0 ? cashStatus : 0;
+    let cashOut = cashStatus < 0 ? Math.abs(cashStatus) : 0;
 
     return reply.send({
       success: true,
@@ -88,8 +241,10 @@ fastify.get('/api/stats', async (request, reply) => {
     return reply.status(500).send({ success: false, error: 'Database error' });
   }
 });
-// Health check
+
+// Health check (публичный)
 fastify.get('/api/health', async () => ({ status: 'ok' }));
 
 // Start
 await fastify.listen({ port: process.env.PORT || 3001, host: '0.0.0.0' });
+console.log('🚀 Fastify server running');
