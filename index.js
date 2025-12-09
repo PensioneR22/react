@@ -60,16 +60,30 @@ fastify.get('/api/logs', async (request, reply) => {
 });
 
 // GET /api/stats
+// GET /api/stats - получение статистики
 fastify.get('/api/stats', async (request, reply) => {
   try {
-    const [rows] = await pool.execute('SELECT COUNT(*) as count FROM players');
-    return reply.send({ success: true, playersCount: rows[0].count });
+    const [playersRows] = await pool.execute('SELECT COUNT(*) as count FROM players');
+    const [configRows] = await pool.execute('SELECT CashStatus FROM Config');
+
+    let cashIn = 0;
+    let cashOut = 0;
+    if (configRows.length >= 2) {
+      cashIn = configRows[0]?.CashStatus || 0;
+      cashOut = configRows[1]?.CashStatus || 0;
+    }
+
+    return reply.send({
+      success: true,
+      playersCount: playersRows[0].count,
+      cashIn,
+      cashOut
+    });
   } catch (error) {
     fastify.log.error(error);
     return reply.status(500).send({ success: false, error: 'Database error' });
   }
 });
-
 // Health check
 fastify.get('/api/health', async () => ({ status: 'ok' }));
 
