@@ -63,4 +63,21 @@ fastify.get('/api/logs', async (request, reply) => {
 fastify.get('/api/health', async () => ({ status: 'ok' }));
 
 await fastify.listen({ port: process.env.PORT || 3001, host: '0.0.0.0' });
+// Добавьте перед fastify.listen
+
+fastify.get('/api/stats', async (request, reply) => {
+  try {
+    const [players] = await pool.execute('SELECT COUNT(*) as count FROM players');
+    return reply.send({ 
+      success: true, 
+      data: {
+        players: players[0].count,
+        online: 50
+      }
+    });
+  } catch (error) {
+    fastify.log.error(error);
+    return reply.status(500).send({ success: false, error: 'Database error' });
+  }
+});
 console.log('🚀 Server running');
