@@ -207,16 +207,15 @@ fastify.get('/api/verify', async (request, reply) => {
   });
 });
 
-// GET /api/logs - ЗАЩИЩЁННЫЙ (с пагинацией и лимитом из настроек)
+// GET /api/logs - ЗАЩИЩЁННЫЙ (с пагинацией)
 fastify.get('/api/logs', { preHandler: authMiddleware }, async (request, reply) => {
   try {
     const page = Math.max(1, parseInt(request.query.page) || 1);
-    const limit = Math.min(150, Math.max(1, parseInt(request.query.limit) || 150));
+    const limit = Math.min(1000, Math.max(1, parseInt(request.query.limit) || 150));
     const offset = (page - 1) * limit;
     const type = request.query.type || '';
     const desc = request.query.desc || '';
     const date = request.query.date || '';
-    const maxTotal = Math.max(1000, Math.min(10000000, parseInt(request.query.maxTotal) || 100000)); // Ограничиваем мин 1K, макс 10M
 
     // Получаем общее количество
     let countQuery = "SELECT COUNT(*) as total FROM action_logs";
@@ -225,7 +224,8 @@ fastify.get('/api/logs', { preHandler: authMiddleware }, async (request, reply) 
     const conditions = [];
     const params = [];
 
-    if (type) {
+    // Поддержка фильтрации по типу. "all" означает все типы
+    if (type && type !== 'all' && type !== '0') {
       conditions.push("type = ?");
       params.push(type);
     }
@@ -244,23 +244,18 @@ fastify.get('/api/logs', { preHandler: authMiddleware }, async (request, reply) 
       dataQuery += whereClause;
     }
 
-    // Сортируем и получаем данные
     dataQuery += " ORDER BY id DESC LIMIT ? OFFSET ?";
 
     const [countRows] = await pool.execute(countQuery, params);
     const [rows] = await pool.execute(dataQuery, [...params, limit.toString(), offset.toString()]);
 
-    // Ограничиваем total согласно настройкам пользователя
-    const actualTotal = Math.min(countRows[0].total, maxTotal);
-
     return reply.send({
       success: true,
       data: rows,
-      total: actualTotal,
+      total: countRows[0].total,
       page,
       limit,
-      totalPages: Math.ceil(actualTotal / limit),
-      maxTotal: maxTotal // Возвращаем фактический лимит для отладки
+      totalPages: Math.ceil(countRows[0].total / limit)
     });
   } catch (error) {
     fastify.log.error(error);
@@ -350,6 +345,154 @@ fastify.post('/api/unlink-telegram', { preHandler: authMiddleware }, async (requ
     fastify.log.info(`Telegram отвязан для игрока: ${nickname} (by ${request.user.nickname})`);
 
     return reply.send({ success: true });
+  } catch (error) {
+    fastify.log.error(error);
+    return reply.status(500).send({ success: false, error: 'Database error' });
+  }
+});
+
+// GET /api/global-settings - получить глобальные настройки - ЗАЩИЩЁННЫЙ
+fastify.get('/api/global-settings', { preHandler: authMiddleware }, async (request, reply) => {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT setting_name, setting_value, description FROM global_settings WHERE setting_name = ? LIMIT 1',
+      ['logs_limit']
+    );
+
+    if (rows.length === 0) {
+      // Если настройки нет, создаём с дефолтными значениями
+      await pool.execute(
+        'INSERT INTO global_settings (setting_name, setting_value, description) VALUES (?, ?, ?)',
+        ['logs_limit', 150, 'Глобальный лимит логов на страницу для всех пользователей']
+      );
+
+      return reply.send({
+        success: true,
+        settings: {
+          logs_limit: 150
+        }
+      });
+    }
+
+    return reply.send({
+      success: true,
+      settings: {
+        logs_limit: rows[0].setting_value || 150
+      }
+    });
+  } catch (error) {
+    fastify.log.error(error);
+    return reply.status(500).send({ success: false, error: 'Database error' });
+  }
+});
+
+// POST /api/global-settings - обновить глобальные настройки - ЗАЩИЩЁННЫЙ
+fastify.post('/api/global-settings', { preHandler: authMiddleware }, async (request, reply) => {
+  try {
+    const { logs_limit } = request.body || {};
+
+    // Валидация лимита логов
+    const limit = Math.min(1000, Math.max(50, parseInt(logs_limit) || 150));
+
+    // Проверяем существование настройки
+    const [existingRows] = await pool.execute(
+      'SELECT id FROM global_settings WHERE setting_name = ? LIMIT 1',
+      ['logs_limit']
+    );
+
+    if (existingRows.length === 0) {
+      // Создаём новую настройку
+      await pool.execute(
+        'INSERT INTO global_settings (setting_name, setting_value, description) VALUES (?, ?, ?)',
+        ['logs_limit', limit, 'Глобальный лимит логов на страницу для всех пользователей']
+      );
+    } else {
+      // Обновляем существующую
+      await pool.execute(
+        'UPDATE global_settings SET setting_value = ? WHERE setting_name = ?',
+        [limit, 'logs_limit']
+      );
+    }
+
+    fastify.log.info(`Глобальные настройки обновлены администратором: ${request.user.nickname} (logs_limit: ${limit})`);
+
+    return reply.send({
+      success: true,
+      settings: {
+        logs_limit: limit
+      }
+    });
+  } catch (error) {
+    fastify.log.error(error);
+    return reply.status(500).send({ success: false, error: 'Database error' });
+  }
+});
+
+// GET /api/user-settings - получить настройки (алиас для совместимости)
+fastify.get('/api/user-settings', { preHandler: authMiddleware }, async (request, reply) => {
+  try {
+    const [rows] = await pool.execute(
+      'SELECT setting_value FROM global_settings WHERE setting_name = ? LIMIT 1',
+      ['logs_limit']
+    );
+
+    if (rows.length === 0) {
+      return reply.send({
+        success: true,
+        settings: {
+          logs_limit: 150
+        }
+      });
+    }
+
+    return reply.send({
+      success: true,
+      settings: {
+        logs_limit: rows[0].setting_value || 150
+      }
+    });
+  } catch (error) {
+    fastify.log.error(error);
+    return reply.status(500).send({ success: false, error: 'Database error' });
+  }
+});
+
+// POST /api/user-settings - обновить настройки (алиас для совместимости)
+fastify.post('/api/user-settings', { preHandler: authMiddleware }, async (request, reply) => {
+  try {
+    const { logs_limit } = request.body || {};
+
+    // Валидация лимита логов
+    const limit = Math.min(1000, Math.max(50, parseInt(logs_limit) || 150));
+
+    // Проверяем существование настройки
+    const [existingRows] = await pool.execute(
+      'SELECT id FROM global_settings WHERE setting_name = ? LIMIT 1',
+      ['logs_limit']
+    );
+
+    if (existingRows.length === 0) {
+      // Создаём новую настройку
+      await pool.execute(
+        'INSERT INTO global_settings (setting_name, setting_value, description) VALUES (?, ?, ?)',
+        ['logs_limit', limit, 'Глобальный лимит логов на страницу для всех пользователей']
+      );
+    } else {
+      // Обновляем существующую
+      await pool.execute(
+        'UPDATE global_settings SET setting_value = ? WHERE setting_name = ?',
+        [limit, 'logs_limit']
+      );
+    }
+
+    fastify.log.info(`Глобальные настройки обновлены администратором: ${request.user.nickname} (logs_limit: ${limit})`);
+
+    return reply.send({
+      success: true,
+      settings: {
+        logs_limit: limit
+      }
+    });
   } catch (error) {
     fastify.log.error(error);
     return reply.status(500).send({ success: false, error: 'Database error' });
