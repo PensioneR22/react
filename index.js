@@ -207,7 +207,7 @@ fastify.get('/api/verify', async (request, reply) => {
   });
 });
 
-// GET /api/logs - ЗАЩИЩЁННЫЙ (с пагинацией)
+// GET /api/logs - ЗАЩИЩЁННЫЙ (с пагинацией и лимитом из настроек)
 fastify.get('/api/logs', { preHandler: authMiddleware }, async (request, reply) => {
   try {
     const page = Math.max(1, parseInt(request.query.page) || 1);
@@ -216,6 +216,7 @@ fastify.get('/api/logs', { preHandler: authMiddleware }, async (request, reply) 
     const type = request.query.type || '';
     const desc = request.query.desc || '';
     const date = request.query.date || '';
+    const maxTotal = Math.max(1000, Math.min(10000000, parseInt(request.query.maxTotal) || 100000)); // Ограничиваем мин 1K, макс 10M
 
     // Получаем общее количество
     let countQuery = "SELECT COUNT(*) as total FROM action_logs";
@@ -243,18 +244,23 @@ fastify.get('/api/logs', { preHandler: authMiddleware }, async (request, reply) 
       dataQuery += whereClause;
     }
 
+    // Сортируем и получаем данные
     dataQuery += " ORDER BY id DESC LIMIT ? OFFSET ?";
 
     const [countRows] = await pool.execute(countQuery, params);
     const [rows] = await pool.execute(dataQuery, [...params, limit.toString(), offset.toString()]);
 
+    // Ограничиваем total согласно настройкам пользователя
+    const actualTotal = Math.min(countRows[0].total, maxTotal);
+
     return reply.send({
       success: true,
       data: rows,
-      total: countRows[0].total,
+      total: actualTotal,
       page,
       limit,
-      totalPages: Math.ceil(countRows[0].total / limit)
+      totalPages: Math.ceil(actualTotal / limit),
+      maxTotal: maxTotal // Возвращаем фактический лимит для отладки
     });
   } catch (error) {
     fastify.log.error(error);
